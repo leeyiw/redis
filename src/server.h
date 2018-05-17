@@ -1163,6 +1163,8 @@ struct redisServer {
     /* Pubsub */
     dict *pubsub_channels;  /* Map channels to list of subscribed clients */
     list *pubsub_patterns;  /* A list of pubsub_patterns */
+    dict *pubsub_patterns_glob;  /* A dict of glob-style pubsub_patterns */
+    dict *pubsub_patterns_simple;  /* A dict of simple pubsub_patterns */
     int notify_keyspace_events; /* Events to propagate via Pub/Sub. This is an
                                    xor of NOTIFY_... flags. */
     /* Cluster */

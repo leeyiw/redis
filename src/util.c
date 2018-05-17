@@ -43,6 +43,29 @@
 #include "util.h"
 #include "sha1.h"
 
+/* Check if given string is a glob-style pattern. */
+int stringIsGlobStylePattern(const char *pattern, int patternLen)
+{
+    while(patternLen) {
+        switch(pattern[0]) {
+        case '*':
+        case '?':
+        case '[':
+        case ']':
+            return 1; /* no match */
+            break;
+        case '\\':
+            if (patternLen >= 2) {
+                pattern++;
+                patternLen--;
+            }
+        }
+        pattern++;
+        patternLen--;
+    }
+    return 0;
+}
+
 /* Glob-style pattern matching. */
 int stringmatchlen(const char *pattern, int patternLen,
         const char *string, int stringLen, int nocase)

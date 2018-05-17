@@ -125,6 +125,9 @@ int pubsubUnsubscribeChannel(client *c, robj *channel, int notify) {
 
 /* Subscribe a client to a pattern. Returns 1 if the operation succeeded, or 0 if the client was already subscribed to that pattern. */
 int pubsubSubscribePattern(client *c, robj *pattern) {
+    dict *pubsub_patterns_dict;
+    dictEntry *de;
+    list *clients;
     int retval = 0;
 
     if (listSearchKey(c->pubsub_patterns,pattern) == NULL) {
@@ -136,6 +139,22 @@ int pubsubSubscribePattern(client *c, robj *pattern) {
         pat->pattern = getDecodedObject(pattern);
         pat->client = c;
         listAddNodeTail(server.pubsub_patterns,pat);
+        if (stringIsGlobStylePattern(pat->pattern->ptr,
+                                     sdslen(pat->pattern->ptr))) {
+            pubsub_patterns_dict = server.pubsub_patterns_glob;
+        } else {
+            pubsub_patterns_dict = server.pubsub_patterns_simple;
+        }
+        /* Add the client to the pattern -> list of clients hash table */
+        de = dictFind(pubsub_patterns_dict,pattern);
+        if (de == NULL) {
+            clients = listCreate();
+            dictAdd(pubsub_patterns_dict,pattern,clients);
+            incrRefCount(pattern);
+        } else {
+            clients = dictGetVal(de);
+        }
+        listAddNodeTail(clients,c);
     }
     /* Notify the client */
     addReply(c,shared.mbulkhdr[3]);
@@ -148,6 +167,9 @@ int pubsubSubscribePattern(client *c, robj *pattern) {
 /* Unsubscribe a client from a channel. Returns 1 if the operation succeeded, or
  * 0 if the client was not subscribed to the specified channel. */
 int pubsubUnsubscribePattern(client *c, robj *pattern, int notify) {
+    dict *pubsub_patterns_dict;
+    dictEntry *de;
+    list *clients;
     listNode *ln;
     pubsubPattern pat;
     int retval = 0;
@@ -160,6 +182,23 @@ int pubsubUnsubscribePattern(client *c, robj *pattern, int notify) {
         pat.pattern = pattern;
         ln = listSearchKey(server.pubsub_patterns,&pat);
         listDelNode(server.pubsub_patterns,ln);
+        if (stringIsGlobStylePattern(pattern->ptr, sdslen(pattern->ptr))) {
+            pubsub_patterns_dict = server.pubsub_patterns_glob;
+        } else {
+            pubsub_patterns_dict = server.pubsub_patterns_simple;
+        }
+        /* Remove the client from the pattern -> clients list hash table */
+        de = dictFind(pubsub_patterns_dict,pattern);
+        serverAssertWithInfo(c,NULL,de != NULL);
+        clients = dictGetVal(de);
+        ln = listSearchKey(clients,c);
+        serverAssertWithInfo(c,NULL,ln != NULL);
+        listDelNode(clients,ln);
+        if (listLength(clients) == 0) {
+            /* Free the list and associated hash entry at all if this was
+             * the latest client. */
+            dictDelete(pubsub_patterns_dict,pattern);
+        }
     }
     /* Notify the client */
     if (notify) {
@@ -225,6 +264,7 @@ int pubsubUnsubscribeAllPatterns(client *c, int notify) {
 int pubsubPublishMessage(robj *channel, robj *message) {
     int receivers = 0;
     dictEntry *de;
+    dictIterator *di;
     listNode *ln;
     listIter li;
 
@@ -246,26 +286,52 @@ int pubsubPublishMessage(robj *channel, robj *message) {
             receivers++;
         }
     }
-    /* Send to clients listening to matching channels */
-    if (listLength(server.pubsub_patterns)) {
-        listRewind(server.pubsub_patterns,&li);
-        channel = getDecodedObject(channel);
-        while ((ln = listNext(&li)) != NULL) {
-            pubsubPattern *pat = ln->value;
+    /* Send to clients listening to matching simple pattern */
+    de = dictFind(server.pubsub_patterns_simple,channel);
+    if (de) {
+        list *list = dictGetVal(de);
+        listNode *ln;
+        listIter li;
 
-            if (stringmatchlen((char*)pat->pattern->ptr,
-                                sdslen(pat->pattern->ptr),
+        listRewind(list,&li);
+        while ((ln = listNext(&li)) != NULL) {
+            client *c = ln->value;
+
+            addReply(c,shared.mbulkhdr[4]);
+            addReply(c,shared.pmessagebulk);
+            addReplyBulk(c,channel);
+            addReplyBulk(c,channel);
+            addReplyBulk(c,message);
+            receivers++;
+        }
+    }
+    /* Send to clients listening to matching glob-style pattern */
+    di = dictGetIterator(server.pubsub_patterns_glob);
+    if (di) {
+        channel = getDecodedObject(channel);
+        while((de = dictNext(di)) != NULL) {
+            robj *pattern = dictGetKey(de);
+            list *clients = dictGetVal(de);
+            if (!stringmatchlen((char*)pattern->ptr,
+                                sdslen(pattern->ptr),
                                 (char*)channel->ptr,
                                 sdslen(channel->ptr),0)) {
-                addReply(pat->client,shared.mbulkhdr[4]);
-                addReply(pat->client,shared.pmessagebulk);
-                addReplyBulk(pat->client,pat->pattern);
-                addReplyBulk(pat->client,channel);
-                addReplyBulk(pat->client,message);
+                continue;
+            }
+            listRewind(clients,&li);
+            while ((ln = listNext(&li)) != NULL) {
+                client *c = listNodeValue(ln);
+
+                addReply(c,shared.mbulkhdr[4]);
+                addReply(c,shared.pmessagebulk);
+                addReplyBulk(c,pattern);
+                addReplyBulk(c,channel);
+                addReplyBulk(c,message);
                 receivers++;
             }
         }
         decrRefCount(channel);
+        dictReleaseIterator(di);
     }
     return receivers;
 }
